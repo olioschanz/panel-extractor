@@ -3,4 +3,3 @@ openai
 pandas
 requests
 beautifulsoup4
-serpapi
