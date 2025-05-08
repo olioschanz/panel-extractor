@@ -4,30 +4,23 @@ import requests
 import openai
 from bs4 import BeautifulSoup
 import re
-from serpapi import GoogleSearch
 import time
 
-# ------------------ CONFIG ------------------
 st.set_page_config(page_title="Panel Extractor", layout="wide")
 st.title("🎤 Panel Extractor")
-st.caption("Extract speaker names, titles, organizations, and emails from a URL or agenda text.")
-# --------------------------------------------
+st.caption("Paste a conference agenda or URL — extract speaker names, titles, organizations, and emails using OpenAI + SerpAPI.")
 
-# API keys
 openai_api_key = st.text_input("🔑 OpenAI API Key", type="password")
-serpapi_api_key = st.text_input("🌍 SerpAPI Key (for web search fallback)", type="password")
+serpapi_key = st.text_input("🌍 SerpAPI Key (optional, for missing email lookups)", type="password")
 
-# Input type selection
 input_method = st.radio("Choose input method:", ["Paste agenda text", "Provide a webpage URL"])
 text_input = ""
 
-# Web scraping or text pasting
 if input_method == "Paste agenda text":
-    agenda_text = st.text_area("📋 Paste agenda or panel text here:", height=300)
-    if agenda_text:
-        text_input = agenda_text
+    text_input = st.text_area("📋 Paste agenda text here:", height=300)
+
 elif input_method == "Provide a webpage URL":
-    url = st.text_input("🌐 Paste the agenda page URL:")
+    url = st.text_input("🌐 Paste the URL of the agenda page:")
     if url:
         try:
             response = requests.get(url, timeout=10)
@@ -35,18 +28,16 @@ elif input_method == "Provide a webpage URL":
             text_input = soup.get_text(separator="\n", strip=True)
             st.success("✅ Page scraped successfully.")
         except Exception as e:
-            st.error(f"Error fetching the page: {e}")
+            st.error(f"Error loading the URL: {e}")
 
-# Extract emails from the raw text using regex
 def extract_emails_from_text(text):
     return list(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)))
 
-# GPT to extract structured contact info
-def extract_speakers_with_gpt(text, openai_api_key):
-    openai.api_key = openai_api_key
+def extract_speakers_with_gpt(text, openai_key):
+    openai.api_key = openai_key
     prompt = f"""
-Extract all speaker details from the following text. Return a list of JSON objects with keys:
-'name', 'title', 'organization'. Do not include people who are not clearly named.
+Extract all speakers from the text below and return a list of JSON objects with keys:
+'name', 'title', 'organization'. Only include clearly named people.
 
 Text:
 \"\"\"
@@ -56,59 +47,57 @@ Text:
     response = openai.ChatCompletion.create(
         model="gpt-4",
         messages=[
-            {"role": "system", "content": "You extract structured contact info from text."},
+            {"role": "system", "content": "You extract structured contact info from messy agenda text."},
             {"role": "user", "content": prompt}
         ],
-        temperature=0.3,
+        temperature=0.2,
         max_tokens=1000
     )
     try:
-        return eval(response['choices'][0]['message']['content'])
+        return eval(response.choices[0].message.content)
     except Exception:
         return []
 
-# SerpAPI to search for emails
 def search_for_email(name, org, serpapi_key):
     query = f"{name} {org} email"
+    url = "https://serpapi.com/search"
     params = {
         "q": query,
         "api_key": serpapi_key,
         "engine": "google",
         "num": 3
     }
-    search = GoogleSearch(params)
-    results = search.get_dict()
-    snippets = []
-    for result in results.get("organic_results", []):
-        snippet = result.get("snippet") or result.get("title") or ""
-        snippets.append(snippet)
-    return " ".join(snippets)
+    try:
+        response = requests.get(url, params=params)
+        results = response.json()
+        snippets = []
+        for result in results.get("organic_results", []):
+            snippet = result.get("snippet") or result.get("title") or ""
+            snippets.append(snippet)
+        return " ".join(snippets)
+    except Exception as e:
+        return ""
 
-# GPT to extract email from snippet
-def extract_email_from_snippets(snippet_text, name, org, openai_api_key):
-    openai.api_key = openai_api_key
+def extract_email_from_snippets(snippet_text, name, org, openai_key):
+    openai.api_key = openai_key
     prompt = f"""
-From this snippet, extract an email address associated with {name} at {org}, if present.
-If no email is found, return "null".
+From the text below, extract the email address for {name} at {org}, if found. Return "null" if not found.
 
-Snippet:
+Text:
 \"\"\"
 {snippet_text}
 \"\"\"
 """
     response = openai.ChatCompletion.create(
         model="gpt-4",
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
+        messages=[{"role": "user", "content": prompt}],
         temperature=0,
         max_tokens=100
     )
-    return response['choices'][0]['message']['content'].strip().replace('"', '')
+    return response.choices[0].message.content.strip().replace('"', '')
 
-# Button to trigger the process
 if st.button("🔍 Extract Panel Info") and text_input and openai_api_key:
-    with st.spinner("Analyzing text with GPT..."):
+    with st.spinner("Analyzing text with OpenAI..."):
         speakers = extract_speakers_with_gpt(text_input, openai_api_key)
 
     emails_in_text = extract_emails_from_text(text_input)
@@ -121,23 +110,21 @@ if st.button("🔍 Extract Panel Info") and text_input and openai_api_key:
         org = speaker.get("organization", "")
         email = ""
 
-        # Match email if available directly in text
+        # Try matching found emails
         for e in emails_in_text:
             if name.split(" ")[-1].lower() in e.lower():
                 email = e
                 break
 
-        # If not found, search online
-        if not email and serpapi_api_key:
+        # Use SerpAPI + GPT if missing
+        if not email and serpapi_key:
             st.write(f"🌐 Searching for: {name} ({org})...")
-            try:
-                snippet = search_for_email(name, org, serpapi_api_key)
-                email = extract_email_from_snippets(snippet, name, org, openai_api_key)
-                if email == "null" or not "@" in email:
-                    email = ""
-            except Exception as e:
-                st.warning(f"Search failed for {name}: {e}")
-            time.sleep(1.5)  # avoid rate-limiting
+            snippet = search_for_email(name, org, serpapi_key)
+            if snippet:
+                extracted = extract_email_from_snippets(snippet, name, org, openai_api_key)
+                if extracted != "null" and "@" in extracted:
+                    email = extracted
+            time.sleep(1.5)  # Avoid SerpAPI rate limits
 
         results.append({
             "Name": name,
